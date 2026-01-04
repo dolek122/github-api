@@ -1,0 +1,7 @@
+github:
+  base-url: https://api.github.com
+
+server:
+  port: 8080
+
+
