@@ -13,8 +13,11 @@ class GithubService {
     }
 
     List<RepositoryResponse> listNonForkReposWithBranches(String username) {
-        return client.getUserRepos(username).stream()
+        List<GithubRepo> nonForkRepos = client.getUserRepos(username).stream()
                 .filter(repo -> !repo.fork())
+                .toList();
+
+        return nonForkRepos.parallelStream()
                 .map(repo -> new RepositoryResponse(
                         repo.name(),
                         repo.owner().login(),

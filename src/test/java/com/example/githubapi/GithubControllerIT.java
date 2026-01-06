@@ -4,14 +4,18 @@ import com.github.tomakehurst.wiremock.WireMockServer;
 import com.github.tomakehurst.wiremock.client.WireMock;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.apache.commons.lang3.time.StopWatch;
 import org.springframework.web.client.RestClient;
 import static com.github.tomakehurst.wiremock.client.WireMock.aResponse;
+import static com.github.tomakehurst.wiremock.client.WireMock.getRequestedFor;
 import static com.github.tomakehurst.wiremock.client.WireMock.okJson;
+import static com.github.tomakehurst.wiremock.client.WireMock.urlMatching;
 import static com.github.tomakehurst.wiremock.core.WireMockConfiguration.wireMockConfig;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -34,6 +38,11 @@ class GithubControllerIT {
         if (wireMock != null) {
             wireMock.stop();
         }
+    }
+
+    @BeforeEach
+    void resetWireMock() {
+        wireMock.resetAll();
     }
 
     @DynamicPropertySource
@@ -99,5 +108,70 @@ class GithubControllerIT {
             assertThat(body).contains("\"status\":404");
             assertThat(body).contains("\"message\":\"GitHub user 'unknown' not found\"");
         }
+    }
+
+    @Test
+    void shouldFetchBranchesInParallel() {
+        int delayMs = 1000;
+
+        wireMock.stubFor(WireMock.get("/users/testuser/repos?per_page=100")
+                .willReturn(aResponse()
+                        .withHeader("Content-Type", "application/json")
+                        .withBody("""
+                                [
+                                  {"name":"repo-1","fork":false,"owner":{"login":"testuser"}},
+                                  {"name":"repo-2","fork":false,"owner":{"login":"testuser"}},
+                                  {"name":"fork-repo","fork":true,"owner":{"login":"testuser"}}
+                                ]
+                                """)
+                        .withFixedDelay(delayMs)));
+
+        wireMock.stubFor(WireMock.get("/repos/testuser/repo-1/branches?per_page=100")
+                .willReturn(aResponse()
+                        .withHeader("Content-Type", "application/json")
+                        .withBody("""
+                                [
+                                  {"name":"main","commit":{"sha":"sha1"}},
+                                  {"name":"develop","commit":{"sha":"sha2"}},
+                                  {"name":"feature/one","commit":{"sha":"sha3"}}
+                                ]
+                                """)
+                        .withFixedDelay(delayMs)));
+
+        wireMock.stubFor(WireMock.get("/repos/testuser/repo-2/branches?per_page=100")
+                .willReturn(aResponse()
+                        .withHeader("Content-Type", "application/json")
+                        .withBody("""
+                                [
+                                  {"name":"main","commit":{"sha":"sha4"}},
+                                  {"name":"release","commit":{"sha":"sha5"}},
+                                  {"name":"hotfix","commit":{"sha":"sha6"}}
+                                ]
+                                """)
+                        .withFixedDelay(delayMs)));
+
+        RestClient client = RestClient.builder().baseUrl("http://localhost:" + port).build();
+
+        StopWatch stopWatch = new StopWatch();
+        stopWatch.start();
+
+        String response = client.get()
+                .uri("/api/github/testuser/repositories")
+                .retrieve()
+                .body(String.class);
+
+        stopWatch.stop();
+        long totalTimeMs = stopWatch.getTime();
+
+        assertThat(response).contains("repo-1");
+        assertThat(response).contains("repo-2");
+        assertThat(response).doesNotContain("fork-repo");
+
+        wireMock.verify(3, getRequestedFor(urlMatching(".*")));
+
+        assertThat(totalTimeMs)
+                .as("Total time should be between 2000ms and 3000ms (parallel branch fetching)")
+                .isGreaterThanOrEqualTo(2000)
+                .isLessThanOrEqualTo(3000);
     }
 }
